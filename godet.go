@@ -180,9 +180,14 @@ type RemoteDebugger struct {
 	closed chan bool
 
 	requests  chan Params
-	responses map[int]chan json.RawMessage
+	responses map[int]chan Response
 	callbacks map[string]EventCallback
 	events    chan wsMessage
+}
+
+type Response struct {
+	msg json.RawMessage
+	err error
 }
 
 // Params is a type alias for the event params structure.
@@ -208,7 +213,7 @@ func Connect(port string, verbose bool) (*RemoteDebugger, error) {
 	remote := &RemoteDebugger{
 		http:      httpclient.NewHttpClient("http://" + port),
 		requests:  make(chan Params),
-		responses: map[int]chan json.RawMessage{},
+		responses: map[int]chan Response{},
 		callbacks: map[string]EventCallback{},
 		events:    make(chan wsMessage, 256),
 		closed:    make(chan bool),
@@ -220,7 +225,7 @@ func Connect(port string, verbose bool) (*RemoteDebugger, error) {
 		httpclient.StartLogging(false, true)
 	}
 
-	if err := remote.connectWs(nil); err != nil {
+	if err := remote.connectWs(nil, false); err != nil {
 		return nil, err
 	}
 
@@ -229,7 +234,7 @@ func Connect(port string, verbose bool) (*RemoteDebugger, error) {
 	return remote, nil
 }
 
-func (remote *RemoteDebugger) connectWs(tab *Tab) error {
+func (remote *RemoteDebugger) connectWs(tab *Tab, force bool) error {
 	if tab == nil || len(tab.WsURL) == 0 {
 		tabs, err := remote.TabList("page")
 		if err != nil {
@@ -253,7 +258,7 @@ func (remote *RemoteDebugger) connectWs(tab *Tab) error {
 	}
 
 	if remote.ws != nil {
-		if tab.ID == remote.current {
+		if tab.ID == remote.current && !force {
 			// nothing to do
 			return nil
 		}
@@ -308,6 +313,10 @@ func (remote *RemoteDebugger) socket() (ws *websocket.Conn) {
 	return
 }
 
+func (remote *RemoteDebugger) Reconnect() error {
+	return remote.connectWs(nil, true)
+}
+
 // Close the RemoteDebugger connection.
 func (remote *RemoteDebugger) Close() (err error) {
 	remote.Lock()
@@ -346,7 +355,7 @@ func (remote *RemoteDebugger) SendRequest(method string, params Params) (map[str
 
 // sendRawReplyRequest sends a request and returns the reply bytes.
 func (remote *RemoteDebugger) sendRawReplyRequest(method string, params Params) ([]byte, error) {
-	responseChann := make(chan json.RawMessage, 1)
+	responseChann := make(chan Response, 2)
 
 	remote.Lock()
 	reqID := remote.reqID
@@ -367,7 +376,7 @@ func (remote *RemoteDebugger) sendRawReplyRequest(method string, params Params) 
 	delete(remote.responses, reqID)
 	remote.Unlock()
 
-	return reply, nil
+	return reply.msg, reply.err
 }
 
 func (remote *RemoteDebugger) sendMessages() {
@@ -385,6 +394,15 @@ func (remote *RemoteDebugger) sendMessages() {
 		ws := remote.socket()
 		err = ws.WriteMessage(websocket.TextMessage, bytes)
 		if err != nil {
+			remote.Lock()
+			ch := remote.responses[message.Int("id")]
+			remote.Unlock()
+
+			if ch != nil {
+				ch <- Response{
+					err: err,
+				}
+			}
 			log.Println("write message:", err)
 		}
 	}
@@ -460,7 +478,9 @@ loop:
 					remote.Unlock()
 
 					if ch != nil {
-						ch <- message.Result
+						ch <- Response{
+							msg: message.Result,
+						}
 					}
 				}
 			}
@@ -561,7 +581,7 @@ func (remote *RemoteDebugger) ActivateTab(tab *Tab) error {
 	resp.Close()
 
 	if err == nil {
-		err = remote.connectWs(tab)
+		err = remote.connectWs(tab, false)
 	}
 
 	return err
@@ -591,7 +611,7 @@ func (remote *RemoteDebugger) NewTab(url string) (*Tab, error) {
 		return nil, err
 	}
 
-	if err = remote.connectWs(&tab); err != nil {
+	if err = remote.connectWs(&tab, false); err != nil {
 		return nil, err
 	}
 
