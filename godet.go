@@ -222,7 +222,7 @@ func Connect(port string, verbose bool) (*RemoteDebugger, error) {
 
 	// remote.http.Verbose = verbose
 	if verbose {
-		httpclient.StartLogging(false, true)
+		httpclient.StartLogging(false, true, true)
 	}
 
 	if err := remote.connectWs(nil, false); err != nil {
